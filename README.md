@@ -1,4 +1,6 @@
 # About
+Improved and corrected library fork of https://github.com/norgor/ModbusRTU.
+
 The ModbusRTU library is a **simple** to use library that allows an arduino to act as a Modbus slave. It attempts to obscure all unnecessary parts of the protocol to provide a clean interface.
 
 The library pre-allocates all necessary memory upon instantiation, which improves the performance of the library and allows for simpler diagnostics. 
