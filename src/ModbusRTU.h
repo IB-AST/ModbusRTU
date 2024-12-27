@@ -32,13 +32,16 @@ namespace ModbusRTU
 		};
 
 		ModbusRegister()
+		: m_RegisterType(None), m_RegisterNumber(0), m_pData(nullptr), m_MinValue(0), m_MaxValue(0), m_readOnly(1)
 		{
-
 		}
 
 		RegisterType m_RegisterType;
 		uint16_t m_RegisterNumber;
 		uint8_t *m_pData;
+		uint16_t m_MinValue; // Minimum allowed value
+		uint16_t m_MaxValue; // Maximum allowed value
+		uint8_t m_readOnly;
 	};
 
 	template <uint16_t registerCount>
@@ -65,6 +68,7 @@ namespace ModbusRTU
 			IllegalDataValue = 3,
 		};
 
+		bool m_modbusEnabled = false;
 		HardwareSerial *m_pHardwareSerial;
 		uint8_t m_SlaveID;
 		ModbusRegister m_RegisterArray[registerCount];
@@ -79,8 +83,19 @@ namespace ModbusRTU
 		//
 		bool isFrameCorrupted(uint8_t *frame, uint16_t frameLength)
 		{
-			//Check if CRC16 is the same
-			return (crc16(frame, frameLength - 2) != *(short*)&frame[frameLength - 2]);
+			// Validate input
+			if (frame == nullptr || frameLength < 2) {
+				return true; // Invalid frame is considered corrupted
+			}
+
+			// Extract received CRC (little-endian format)
+			uint16_t receivedCrc = frame[frameLength - 2] | (frame[frameLength - 1] << 8);
+
+			// Calculate CRC for the data portion of the frame
+			uint16_t calculatedCrc = crc16(frame, frameLength - 2);
+
+			// Check if CRC matches
+			return (calculatedCrc != receivedCrc);
 		}
 
 		//Sends exception to master
@@ -113,34 +128,44 @@ namespace ModbusRTU
 		//Returns true when frame is successfully received
 		bool receiveFrame()
 		{
-			if (m_pHardwareSerial->available())
-			{
+			// Check if the input frame is already full
+			if (m_InputFrameLength >= MODBUS_MAX_FRAME_LENGTH) {
+				clearInputFrame();
+				return false;
+			}
+
+			// Read available data into the input frame
+			if (m_pHardwareSerial->available()) {
 				m_InputFrameLength += m_pHardwareSerial->readBytes(&m_InputFrame[m_InputFrameLength], MODBUS_MAX_FRAME_LENGTH - m_InputFrameLength);
 
-				// Check if frame function code has been received
-				if (m_InputFrameLength >= 2)
-				{
-					//Function length check
-					if (m_InputFrame[1] >= FunctionCode::ReadCoils && m_InputFrame[1] <= FunctionCode::WriteSingleRegister)
-					{
+				// Check if at least 2 bytes (slave address + function code) are received
+				if (m_InputFrameLength >= 2) {
+
+					// Function length checks for different function codes
+					if (m_InputFrame[1] == FunctionCode::ReadCoils ||
+						m_InputFrame[1] == FunctionCode::ReadDiscreteInputs ||
+						m_InputFrame[1] == FunctionCode::WriteSingleCoil ||
+						m_InputFrame[1] == FunctionCode::WriteSingleRegister ||
+						m_InputFrame[1] == FunctionCode::ReadMultipleHoldingRegisters ||
+						m_InputFrame[1] == FunctionCode::ReadInputRegisters) {
 						return m_InputFrameLength == 8;
 					}
-					else if (m_InputFrame[1] == FunctionCode::WriteMultipleCoils || m_InputFrame[1] == FunctionCode::WriteMultipleRegisters)
-					{
+					else if (m_InputFrame[1] == FunctionCode::WriteMultipleCoils || 
+							m_InputFrame[1] == FunctionCode::WriteMultipleRegisters) {
 						return m_InputFrameLength == m_InputFrame[6] + 9;
 					}
-					else
-					{
-						//Throw exception and wait for master to receive it.
+					else {
+						// Throw exception for illegal function code
 						throwException(ExceptionCode::IllegalFunction);
-						m_pHardwareSerial->flush();
+						DLN_MB("MB: receiveFrame - IllegalFunction");
 
-						//Empty the serial input buffer.
-						m_pHardwareSerial->readBytes(m_InputFrame, MODBUS_MAX_FRAME_LENGTH);
+						// Clear the current input frame
 						clearInputFrame();
+						return false;
 					}
 				}
 			}
+
 			return false;
 		}
 
@@ -196,6 +221,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: ReadCoils - IllegalDataAddress");
 						return;
 					}
 				}
@@ -233,6 +259,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: ReadDiscreteInputs - IllegalDataAddress");
 						return;
 					}
 				}
@@ -261,11 +288,13 @@ namespace ModbusRTU
 					if (pRegister && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
 					{
 						*(uint16_t*)&m_OutputFrame[3 + (i * 2)] = endianSwap16(*(uint16_t*)pRegister->m_pData);
+						DLN_MB("MB: Read - Addr " + String(targetRegister+i, DEC) + " Value " + String(*(uint16_t*)pRegister->m_pData,DEC));
 					}
 					else
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: ReadMultipleHoldingRegisters - IllegalDataAddress");
 						return;
 					}
 				}
@@ -299,6 +328,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: ReadInputRegisters - IllegalDataAddress");
 						return;
 					}
 				}
@@ -320,6 +350,7 @@ namespace ModbusRTU
 				{
 					//Throw exception if exister is non-existent or incorrect type
 					throwException(ExceptionCode::IllegalDataAddress);
+					DLN_MB("MB: WriteSingleCoil - IllegalDataAddress");
 					return;
 				}
 
@@ -328,17 +359,22 @@ namespace ModbusRTU
 			else if (frame[1] == WriteSingleRegister)
 			{
 				ModbusRegister *pRegister = findRegister(endianSwap16(*(uint16_t*)&frame[2]));
-
-				//Check if register exists and if it is of correct type
-				if (pRegister && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
+				
+				if (pRegister && pRegister->m_readOnly==0 && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
 				{
-					//Write the target value to the register
-					*(uint16_t*)pRegister->m_pData = endianSwap16(*(uint16_t*)&frame[4]);
+					uint16_t value = endianSwap16(*(uint16_t*)&frame[4]);
+					if (value < pRegister->m_MinValue || value > pRegister->m_MaxValue)
+					{
+						throwException(ExceptionCode::IllegalDataValue);
+						DLN_MB("MB: WriteSingleRegister - IllegalDataValue");
+						return;
+					}
+					*(uint16_t*)pRegister->m_pData = value;
 				}
 				else
 				{
-					//Throw exception if exister is non-existent or incorrect type
 					throwException(ExceptionCode::IllegalDataAddress);
+					DLN_MB("MB: WriteSingleRegister - IllegalDataAddress");
 					return;
 				}
 
@@ -363,6 +399,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is non-existent or incorrect type
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: WriteMultipleCoils - IllegalDataAddress");
 						return;
 					}
 				}
@@ -377,25 +414,48 @@ namespace ModbusRTU
 			{
 				uint16_t targetRegister = endianSwap16(*(uint16_t*)&frame[2]);
 				uint16_t targetRegisterLength = endianSwap16(*(uint16_t*)&frame[4]);
+				uint8_t byteCount = frame[6];
+
+				// Validate that the byte count matches the expected data length
+				if (byteCount != targetRegisterLength * 2) {
+					throwException(ExceptionCode::IllegalDataValue);
+					DLN_MB("MB: WriteMultipleRegisters - Mismatched byte count");
+					return;
+				}
 
 				for (uint16_t i = 0; i < targetRegisterLength; i++)
 				{
 					ModbusRegister *pRegister = findRegister(targetRegister + i);
 
-					//Check if register exists and if it is of correct type
-					if (pRegister && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
+					// Check if register exists and if it is of correct type
+					if (pRegister && pRegister->m_readOnly == 0 && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
 					{
-						//Write the target value to coil
-						*(uint16_t*)pRegister->m_pData = endianSwap16(*(uint16_t*)&frame[7 + (i * 2)]);
+						// Calculate the offset for the current register's value
+						uint16_t valueOffset = 7 + i * 2;
+						uint16_t value = endianSwap16(*(uint16_t*)&frame[valueOffset]);
+
+						// Validate the value against register constraints
+						if (value < pRegister->m_MinValue || value > pRegister->m_MaxValue)
+						{
+							throwException(ExceptionCode::IllegalDataValue);
+							DLN_MB("MB: WriteMultipleRegisters - IllegalDataValue");
+							return;
+						}
+
+						// Write the value to the register
+						*(uint16_t*)pRegister->m_pData = value;
+						DLN_MB("MB: Write - Addr " + String(targetRegister + i, DEC) + " Value " + String(value, DEC));
 					}
 					else
 					{
-						//Throw exception if register is non-existent or incorrect type
+						// Throw exception if register is non-existent or incorrect type
 						throwException(ExceptionCode::IllegalDataAddress);
+						DLN_MB("MB: WriteMultipleRegisters - IllegalDataAddress");
 						return;
 					}
 				}
 
+				// Construct response frame
 				m_OutputFrame[0] = frame[0];
 				m_OutputFrame[1] = frame[1];
 				m_OutputFrame[2] = frame[2];
@@ -410,7 +470,7 @@ namespace ModbusRTU
 		//Length of data type depends on register type
 		//Input registers and holding registers are two-byte
 		//Discrete inputs and coils are one-byte
-		int32_t addRegister(byte *pData, uint16_t _register, ModbusRegister::RegisterType registerType)
+		int32_t addRegister(byte *pData, uint16_t _register, ModbusRegister::RegisterType registerType, uint16_t minValue = 0, uint16_t maxValue = 0xFFFF, uint8_t readOnly = 1)
 		{
 			if (m_AssignedRegisters >= registerCount || findRegister(_register))
 				return -1;
@@ -418,44 +478,49 @@ namespace ModbusRTU
 			m_RegisterArray[m_AssignedRegisters].m_RegisterType = registerType;
 			m_RegisterArray[m_AssignedRegisters].m_RegisterNumber = _register;
 			m_RegisterArray[m_AssignedRegisters].m_pData = pData;
+			m_RegisterArray[m_AssignedRegisters].m_MinValue = minValue;
+			m_RegisterArray[m_AssignedRegisters].m_MaxValue = maxValue;
+			m_RegisterArray[m_AssignedRegisters].m_readOnly = readOnly;
 
 			m_AssignedRegisters++;
+
+			return 0;
 		}
 
 	public:
 
 		ModbusRTUSlave() {}
 
-		//Adds coil to register list and returns register number
-		//Returns -1 when no more registers available
+		// Adds coil to register list and returns register number
+		// Returns -1 when no more registers available
 		//
-		int32_t addCoil(bool *coil, uint16_t _register)
+		int32_t addCoil(bool *coil, uint16_t _register, uint8_t readOnly = 0)
 		{
-			return addRegister((byte*)coil, _register, ModbusRegister::Coil);
+			return addRegister((byte*)coil, _register, ModbusRegister::Coil, 0, 1, readOnly);
 		}
 
-		//Adds discrete input to register list and returns register number
-		//Returns -1 when no more registers available
+		// Adds discrete input to register list and returns register number
+		// Returns -1 when no more registers available
 		//
-		int32_t addDiscreteInput(const bool *discreteInput, uint16_t _register)
+		int32_t addDiscreteInput(const bool *discreteInput, uint16_t _register, uint8_t readOnly = 1)
 		{
-			return addRegister((byte*)discreteInput, _register, ModbusRegister::DiscreteInput);
+			return addRegister((byte*)discreteInput, _register, ModbusRegister::DiscreteInput, 0, 1, readOnly);
 		}
 
 		//Adds input register to register list and returns register number'
 		//Returns -1 when no more registers available
 		//
-		int32_t addInputRegister(const uint16_t *inputRegister, uint16_t _register)
+		int32_t addInputRegister(const uint16_t *inputRegister, uint16_t _register, uint16_t minValue = 0, uint16_t maxValue = 0xFFFF, uint8_t readOnly = 1)
 		{
-			return addRegister((byte*)inputRegister, _register, ModbusRegister::InputRegister);
+			return addRegister((byte*)inputRegister, _register, ModbusRegister::InputRegister, minValue, maxValue, readOnly);
 		}
 
 		//Adds holding register to register list and returns register 
 		//Returns -1 when no more registers available
 		//
-		int32_t addHoldingRegister(uint16_t *holdingRegister, uint16_t _register)
+		int32_t addHoldingRegister(uint16_t *holdingRegister, uint16_t _register, uint16_t minValue = 0, uint16_t maxValue = 0xFFFF, uint8_t readOnly = 1)
 		{
-			return addRegister((byte*)holdingRegister, _register, ModbusRegister::HoldingRegister);
+			return addRegister((byte*)holdingRegister, _register, ModbusRegister::HoldingRegister, minValue, maxValue, readOnly);
 		}
 
 		//Initializes Modbus and serial data transmission
@@ -500,6 +565,7 @@ namespace ModbusRTU
 				if (m_InputFrame[0] != m_SlaveID)
 				{
 					clearInputFrame();
+					DLN_MB("MB: update - wrong id");
 					return;
 				}
 
@@ -507,15 +573,34 @@ namespace ModbusRTU
 				if (isFrameCorrupted(m_InputFrame, m_InputFrameLength))
 				{
 					clearInputFrame();
+					DLN_MB("MB: update - frame corrupted");
 					return;
 				}
+				else {
+					//DLN_MB("MB: update - frame okay");
+				}
 
-				//Parses the incoming frame
-				parseFrame(m_InputFrame, m_InputFrameLength);
+				//Parses the incoming frame when enabled
+				if(m_modbusEnabled) {
+					parseFrame(m_InputFrame, m_InputFrameLength);
+				}
 
 				clearInputFrame();
 			}
 		}
+
+		void enable() {
+
+			m_modbusEnabled = true;
+
+		}
+
+		void disable() {
+
+			m_modbusEnabled = false;
+
+		}
+
 	};
 }
 #endif
