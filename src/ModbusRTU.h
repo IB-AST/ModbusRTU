@@ -536,7 +536,7 @@ namespace ModbusRTU
 			}
 
 
-			pinMode(13, OUTPUT);
+			//pinMode(13, OUTPUT);
 
 			//Initialize variables
 			m_BaudRate = baud;
