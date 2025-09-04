@@ -288,7 +288,7 @@ namespace ModbusRTU
 					if (pRegister && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
 					{
 						*(uint16_t*)&m_OutputFrame[3 + (i * 2)] = endianSwap16(*(uint16_t*)pRegister->m_pData);
-						DLN_MB("MB: Read - Addr " + String(targetRegister+i, DEC) + " Value " + String(*(uint16_t*)pRegister->m_pData,DEC));
+						DBF_MB("MB: Read - Addr %u Value %u\n", targetRegister + i, *(uint16_t*)pRegister->m_pData);
 					}
 					else
 					{
@@ -444,7 +444,7 @@ namespace ModbusRTU
 
 						// Write the value to the register
 						*(uint16_t*)pRegister->m_pData = value;
-						DLN_MB("MB: Write - Addr " + String(targetRegister + i, DEC) + " Value " + String(value, DEC));
+						DBF_MB("MB: Write - Addr %u Value %u\n", targetRegister + i, value);
 					}
 					else
 					{
