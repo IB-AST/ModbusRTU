@@ -221,7 +221,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: ReadCoils - IllegalDataAddress");
+						DBF_MB("MB: ReadCoils - IllegalDataAddress at Addr %u\n", targetRegister);
 						return;
 					}
 				}
@@ -259,7 +259,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: ReadDiscreteInputs - IllegalDataAddress");
+						DBF_MB("MB: ReadDiscreteInputs - IllegalDataAddress at Addr %u\n", targetRegister);
 						return;
 					}
 				}
@@ -294,7 +294,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: ReadMultipleHoldingRegisters - IllegalDataAddress");
+						DBF_MB("MB: ReadMultipleHoldingRegisters - IllegalDataAddress at Addr %u\n", targetRegister + i);
 						return;
 					}
 				}
@@ -328,7 +328,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is not valid
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: ReadInputRegisters - IllegalDataAddress");
+						DBF_MB("MB: ReadInputRegisters - IllegalDataAddress at Addr %u\n", targetRegister);
 						return;
 					}
 				}
@@ -357,7 +357,8 @@ namespace ModbusRTU
 				m_pHardwareSerial->write(frame, 8);
 			}
 			else if (frame[1] == WriteSingleRegister)
-			{
+			{	
+				const uint16_t targetAddr = endianSwap16(*(uint16_t*)&frame[2]);
 				ModbusRegister *pRegister = findRegister(endianSwap16(*(uint16_t*)&frame[2]));
 				
 				if (pRegister && pRegister->m_readOnly==0 && pRegister->m_RegisterType == ModbusRegister::HoldingRegister)
@@ -366,7 +367,7 @@ namespace ModbusRTU
 					if (value < pRegister->m_MinValue || value > pRegister->m_MaxValue)
 					{
 						throwException(ExceptionCode::IllegalDataValue);
-						DLN_MB("MB: WriteSingleRegister - IllegalDataValue");
+						DBF_MB("MB: WriteSingleRegister - IllegalDataValue at Addr %u: Value=%u (Allowed: %u..%u)\n", targetAddr, value, pRegister->m_MinValue, pRegister->m_MaxValue);
 						return;
 					}
 					*(uint16_t*)pRegister->m_pData = value;
@@ -374,7 +375,7 @@ namespace ModbusRTU
 				else
 				{
 					throwException(ExceptionCode::IllegalDataAddress);
-					DLN_MB("MB: WriteSingleRegister - IllegalDataAddress");
+					DBF_MB("MB: WriteSingleRegister - IllegalDataAddress at Addr %u\n", targetAddr);
 					return;
 				}
 
@@ -399,7 +400,7 @@ namespace ModbusRTU
 					{
 						//Throw exception if register is non-existent or incorrect type
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: WriteMultipleCoils - IllegalDataAddress");
+						DBF_MB("MB: WriteMultipleCoils - IllegalDataAddress at Addr %u\n", targetRegister);
 						return;
 					}
 				}
@@ -438,7 +439,7 @@ namespace ModbusRTU
 						if (value < pRegister->m_MinValue || value > pRegister->m_MaxValue)
 						{
 							throwException(ExceptionCode::IllegalDataValue);
-							DLN_MB("MB: WriteMultipleRegisters - IllegalDataValue");
+							DBF_MB("MB: WriteMultipleRegisters - IllegalDataValue at Addr %u: Value=%u (Allowed: %u..%u)\n", targetRegister + i, value, pRegister->m_MinValue, pRegister->m_MaxValue);
 							return;
 						}
 
@@ -450,8 +451,8 @@ namespace ModbusRTU
 					{
 						// Throw exception if register is non-existent or incorrect type
 						throwException(ExceptionCode::IllegalDataAddress);
-						DLN_MB("MB: WriteMultipleRegisters - IllegalDataAddress");
-						return;
+						DBF_MB("MB: WriteMultipleRegisters - IllegalDataAddress at Addr %u\n", targetRegister + i);
+        				return;
 					}
 				}
 
@@ -489,7 +490,12 @@ namespace ModbusRTU
 
 	public:
 
-		ModbusRTUSlave() {}
+		ModbusRTUSlave() : m_pHardwareSerial(nullptr),
+						m_SlaveID(1),
+						m_AssignedRegisters(0),
+						m_BaudRate(0),
+						m_InputFrameLength(0)
+		{}
 
 		// Adds coil to register list and returns register number
 		// Returns -1 when no more registers available
@@ -528,15 +534,36 @@ namespace ModbusRTU
 		//
 		void begin(uint32_t baud, HardwareSerial *pHardwareSerial = &Serial, uint8_t slaveId = 1)
 		{
+
+			DLN_MB("MB: Starting Modbus module...");
+
 			//Clear all registers
 			for (uint16_t i = 0; i < registerCount; i++)
 			{
 				m_RegisterArray[i].m_RegisterType = ModbusRegister::None;
 				m_RegisterArray[i].m_pData = nullptr;
 			}
+			m_AssignedRegisters = 0; 
 
+			//Initialize variables
+			m_BaudRate = baud;
+			m_SlaveID = slaveId;
 
-			//pinMode(13, OUTPUT);
+			clearInputFrame();
+
+			//Initialize serial
+			m_pHardwareSerial = pHardwareSerial;
+			pHardwareSerial->begin(m_BaudRate);
+			pHardwareSerial->setTimeout(0);
+
+			//Empty the serial buffer
+			m_pHardwareSerial->readBytes(m_InputFrame, MODBUS_MAX_FRAME_LENGTH);
+		}
+
+		void updateSettings(uint32_t baud, HardwareSerial *pHardwareSerial = &Serial, uint8_t slaveId = 1)
+		{
+
+			DLN_MB("MB: Updating Modbus settings...");
 
 			//Initialize variables
 			m_BaudRate = baud;
