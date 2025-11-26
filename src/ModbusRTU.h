@@ -77,6 +77,27 @@ namespace ModbusRTU
 		uint8_t m_InputFrame[MODBUS_MAX_FRAME_LENGTH];
 		uint8_t m_OutputFrame[MODBUS_MAX_FRAME_LENGTH];
 		uint8_t m_InputFrameLength;
+		uint32_t m_responseDelayUs  = 0;   // Delay between RX frame complete and TX response
+		bool     m_responsePending  = false;
+		uint32_t m_frameReadyTimeUs = 0;   // micros() when RX frame was complete
+
+        // Compute Modbus RTU response delay based on baudrate.
+        // Approx. 3.5 character times: 1 char ≈ 11 bits → 38.5 bit times
+        void updateResponseDelayFromBaud()
+        {
+            if (m_BaudRate == 0) {
+                m_responseDelayUs = 0;
+                return;
+            }
+
+            // guard_us ≈ 38.5e6 / baud
+            const uint32_t numerator = 38500000UL; // 38.5 * 1e6
+            m_responseDelayUs = (numerator + m_BaudRate - 1) / m_BaudRate; // baudrate depentant delay
+			//m_responseDelayUs = 750; // fixed delay
+
+            // Optional: Sicherheitsfaktor, falls Master sehr knapp ist:
+            // m_responseDelayUs *= 2;
+        }
 
 		//Checks if frame has been corrupted
 		//
@@ -490,11 +511,15 @@ namespace ModbusRTU
 
 	public:
 
-		ModbusRTUSlave() : m_pHardwareSerial(nullptr),
-						m_SlaveID(1),
-						m_AssignedRegisters(0),
-						m_BaudRate(0),
-						m_InputFrameLength(0)
+		ModbusRTUSlave()
+			: m_pHardwareSerial(nullptr),
+			m_SlaveID(1),
+			m_AssignedRegisters(0),
+			m_BaudRate(0),
+			m_InputFrameLength(0),
+			m_responseDelayUs(0),
+			m_responsePending(false),
+			m_frameReadyTimeUs(0)
 		{}
 
 		// Adds coil to register list and returns register number
@@ -551,6 +576,9 @@ namespace ModbusRTU
 
 			clearInputFrame();
 
+            // compute delay based on baudrate
+            updateResponseDelayFromBaud();
+
 			//Initialize serial
 			m_pHardwareSerial = pHardwareSerial;
 			pHardwareSerial->begin(m_BaudRate);
@@ -570,6 +598,9 @@ namespace ModbusRTU
 			m_SlaveID = slaveId;
 
 			clearInputFrame();
+            
+			// recompute delay on baud change
+            updateResponseDelayFromBaud();
 
 			//Initialize serial
 			m_pHardwareSerial = pHardwareSerial;
@@ -583,38 +614,54 @@ namespace ModbusRTU
 		//Checks for incoming frames from master
 		//If frame has been received then it is parsed
 		//
-		void update()
-		{
-			//Check if a new frame is available
-			if (receiveFrame())
-			{
-				//Check slave ID
-				if (m_InputFrame[0] != m_SlaveID)
-				{
-					clearInputFrame();
-					DLN_MB("MB: update - wrong id");
-					return;
-				}
+        void update()
+        {
+            // 1) Wenn noch keine Antwort ansteht: versuchen, ein neues Frame zu empfangen
+            if (!m_responsePending)
+            {
+                if (receiveFrame())
+                {
+                    //Check slave ID
+                    if (m_InputFrame[0] != m_SlaveID)
+                    {
+                        clearInputFrame();
+                        DLN_MB("MB: update - wrong id");
+                        return;
+                    }
 
-				//Check if frame is corrupted
-				if (isFrameCorrupted(m_InputFrame, m_InputFrameLength))
-				{
-					clearInputFrame();
-					DLN_MB("MB: update - frame corrupted");
-					return;
-				}
-				else {
-					//DLN_MB("MB: update - frame okay");
-				}
+                    //Check if frame is corrupted
+                    if (isFrameCorrupted(m_InputFrame, m_InputFrameLength))
+                    {
+                        clearInputFrame();
+                        DLN_MB("MB: update - frame corrupted");
+                        return;
+                    }
 
-				//Parses the incoming frame when enabled
-				if(m_modbusEnabled) {
-					parseFrame(m_InputFrame, m_InputFrameLength);
-				}
+                    // Frame ist gültig und für uns → Antwort planen
+                    m_responsePending  = true;
+                    m_frameReadyTimeUs = micros();  // Arduino/ESP32: Zeitstempel in µs
+                }
+            }
+            else
+            {
+                // 2) Es wartet bereits ein Frame auf seine Antwort
+                uint32_t nowUs = micros();
 
-				clearInputFrame();
-			}
-		}
+                // Falls keine Verzögerung konfiguriert ist, sofort antworten
+                if (m_responseDelayUs == 0 ||
+                    (uint32_t)(nowUs - m_frameReadyTimeUs) >= m_responseDelayUs)
+                {
+                    if (m_modbusEnabled)
+                    {
+                        // Jetzt erst Handler/Antwort ausführen
+                        parseFrame(m_InputFrame, m_InputFrameLength);
+                    }
+
+                    clearInputFrame();
+                    m_responsePending = false;
+                }
+            }
+        }
 
 		void enable() {
 
